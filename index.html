@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Transferência NFC + WebRTC</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      background-color: #f7f7f7;
+      text-align: center;
+    }
+    .hidden {
+      display: none;
+    }
+    .section {
+      margin-bottom: 20px;
+      padding: 15px;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+    }
+    button {
+      padding: 10px 20px;
+      margin: 10px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    input[type="file"] {
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Transferência NFC + WebRTC</h1>
+  <p><em>Exemplo experimental para Android com Chrome (HTTPS e Web NFC ativado)</em></p>
+
+  <!-- Seleção de papel -->
+  <div id="roleSelection" class="section">
+    <p>Selecione seu papel:</p>
+    <button onclick="selectRole('host')">Host NFC</button>
+    <button onclick="selectRole('guest')">Hospedeiro NFC</button>
+  </div>
+
+  <!-- UI para Host -->
+  <div id="hostUI" class="section hidden">
+    <h2>Host NFC</h2>
+    <button onclick="startHost()">Iniciar Conexão</button>
+    <p id="hostStatus"></p>
+    <div id="hostTransfer" class="hidden">
+      <input type="file" id="fileInput">
+      <button onclick="sendFile()">Enviar Arquivo</button>
+    </div>
+  </div>
+
+  <!-- UI para Hospedeiro -->
+  <div id="guestUI" class="section hidden">
+    <h2>Hospedeiro NFC</h2>
+    <button onclick="startGuest()">Ler Oferta NFC</button>
+    <p id="guestStatus"></p>
+    <div id="guestTransfer" class="hidden">
+      <p id="receivedFile"></p>
+    </div>
+  </div>
+
+  <script>
+    // Ao carregar a página, verifica o suporte ao NFC e WebRTC.
+    window.onload = async () => {
+      checkSupport();
+    };
+
+    function checkSupport() {
+      // Verifica suporte a NFC
+      if (!("NDEFReader" in window)) {
+        alert("Web NFC não suportado neste dispositivo.");
+      }
+      // Verifica suporte a WebRTC
+      if (!window.RTCPeerConnection) {
+        alert("WebRTC não suportado neste navegador. A simulação de Wi‑Fi Direct não funcionará.");
+      }
+    }
+
+    // Variáveis globais para definir o papel e armazenar a conexão
+    let role;
+    let peerConnection;
+    let dataChannel;
+    // Configuração básica do WebRTC (usando um servidor STUN público)
+    const configuration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+    // Função para selecionar o papel
+    function selectRole(selectedRole) {
+      role = selectedRole;
+      document.getElementById("roleSelection").classList.add("hidden");
+      if (role === "host") {
+        document.getElementById("hostUI").classList.remove("hidden");
+      } else {
+        document.getElementById("guestUI").classList.remove("hidden");
+      }
+    }
+
+    // -------------------------
+    // Fluxo para o HOST
+    async function startHost() {
+      setHostStatus("Criando conexão WebRTC...");
+      // Cria a conexão e uma DataChannel para transferência de dados
+      peerConnection = new RTCPeerConnection(configuration);
+      dataChannel = peerConnection.createDataChannel("fileTransfer");
+
+      // Quando a DataChannel abrir, habilitamos a área de transferência
+      dataChannel.onopen = () => {
+        setHostStatus("Conexão estabelecida! Você pode enviar arquivos.");
+        document.getElementById("hostTransfer").classList.remove("hidden");
+      };
+      dataChannel.onerror = (error) => {
+        setHostStatus("Erro na DataChannel: " + error);
+      };
+
+      // Coleta de ICE candidates
+      peerConnection.onicecandidate = async (event) => {
+        if (event.candidate === null) { // Final dos candidatos
+          let offer = peerConnection.localDescription;
+          setHostStatus("Oferta criada. Enviando oferta via NFC...");
+          // Envia a oferta via NFC (isso solicitará a permissão para NFC, se necessário)
+          await writeNFC(JSON.stringify(offer));
+          setHostStatus("Oferta enviada. Aguardando resposta via NFC...");
+          // Após enviar a oferta, o host passa a ler a resposta
+          listenForNFCAnswer();
+        }
+      };
+
+      // Cria a oferta do WebRTC
+      try {
+        let offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+      } catch (e) {
+        setHostStatus("Erro ao criar a oferta: " + e);
+      }
+    }
+
+    // Função para enviar arquivo do Host
+    function sendFile() {
+      const fileInput = document.getElementById("fileInput");
+      if (fileInput.files.length === 0) {
+        alert("Selecione um arquivo primeiro.");
+        return;
+      }
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+      reader.onload = () => {
+        // Aqui o arquivo é lido como texto para simplificar o exemplo.
+        // Para arquivos binários, use ArrayBuffer e implemente fragmentação/reconstrução.
+        dataChannel.send(reader.result);
+        setHostStatus("Arquivo enviado: " + file.name);
+      };
+      reader.readAsText(file);
+    }
+
+    function setHostStatus(msg) {
+      document.getElementById("hostStatus").innerText = msg;
+    }
+
+    // -------------------------
+    // Fluxo para o HOSPEDEIRO
+    async function startGuest() {
+      setGuestStatus("Aguardando leitura da oferta via NFC...");
+      // Utiliza o Web NFC para ler a oferta do host
+      if ("NDEFReader" in window) {
+        try {
+          const ndef = new NDEFReader();
+          await ndef.scan();
+          ndef.onreading = async (event) => {
+            // Processa todos os registros da mensagem NFC
+            for (const record of event.message.records) {
+              if (record.recordType === "text") {
+                let offerText = new TextDecoder(record.encoding).decode(record.data);
+                setGuestStatus("Oferta recebida via NFC. Conectando...");
+                // Cria a conexão como hospedeiro
+                await connectAsGuest(JSON.parse(offerText));
+              }
+            }
+          };
+        } catch (e) {
+          setGuestStatus("Erro ao ler NFC: " + e);
+        }
+      } else {
+        setGuestStatus("Web NFC não suportado neste dispositivo.");
+      }
+    }
+
+    async function connectAsGuest(offer) {
+      peerConnection = new RTCPeerConnection(configuration);
+      // Quando o hospedeiro receber a DataChannel do host
+      peerConnection.ondatachannel = (event) => {
+        dataChannel = event.channel;
+        dataChannel.onmessage = (e) => {
+          document.getElementById("guestTransfer").classList.remove("hidden");
+          document.getElementById("receivedFile").innerText = "Arquivo recebido: " + e.data;
+        };
+        dataChannel.onopen = () => {
+          setGuestStatus("Conexão estabelecida!");
+        };
+      };
+
+      try {
+        // Configura a oferta recebida
+        await peerConnection.setRemoteDescription(offer);
+        // Cria uma resposta
+        let answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        setGuestStatus("Criando resposta. Enviando resposta via NFC...");
+        // Envia a resposta via NFC para o host ler
+        await writeNFC(JSON.stringify(answer));
+        setGuestStatus("Resposta enviada. Conexão sendo estabelecida...");
+      } catch (e) {
+        setGuestStatus("Erro durante a conexão: " + e);
+      }
+    }
+
+    function setGuestStatus(msg) {
+      document.getElementById("guestStatus").innerText = msg;
+    }
+
+    // -------------------------
+    // Funções para escrita e leitura NFC
+    async function writeNFC(message) {
+      if ("NDEFReader" in window) {
+        try {
+          const ndef = new NDEFReader();
+          await ndef.write(message);
+          console.log("Mensagem NFC escrita:", message);
+        } catch (e) {
+          console.error("Erro ao escrever NFC:", e);
+          throw e;
+        }
+      } else {
+        throw new Error("Web NFC não suportado.");
+      }
+    }
+
+    // No host, após enviar a oferta, escuta a resposta via NFC
+    async function listenForNFCAnswer() {
+      if ("NDEFReader" in window) {
+        try {
+          const ndef = new NDEFReader();
+          await ndef.scan();
+          ndef.onreading = async (event) => {
+            for (const record of event.message.records) {
+              if (record.recordType === "text") {
+                let answerText = new TextDecoder(record.encoding).decode(record.data);
+                setHostStatus("Resposta NFC recebida. Finalizando conexão...");
+                await peerConnection.setRemoteDescription(JSON.parse(answerText));
+              }
+            }
+          };
+        } catch (e) {
+          setHostStatus("Erro ao ler resposta NFC: " + e);
+        }
+      }
+    }
+  </script>
+</body>
+</html>
