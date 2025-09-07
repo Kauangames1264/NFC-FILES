@@ -1,76 +1,194 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8">
-  <title>Transferência NFC + WebRTC</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Proximity Sensor Demo v1.1</title> <!-- versão 1.1 -->
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 20px;
-      background-color: #f7f7f7;
-      text-align: center;
-    }
-    .hidden {
-      display: none;
-    }
-    .section {
-      margin-bottom: 20px;
-      padding: 15px;
-      background: #fff;
-      border-radius: 8px;
-      box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
-    }
-    button {
-      padding: 10px 20px;
-      margin: 10px;
-      font-size: 16px;
-      cursor: pointer;
-    }
-    input[type="file"] {
-      margin: 10px 0;
-    }
+    /* Estilo simples. Sem canvas. */
+    :root{ --bg:#0b0b0f; --fg:#e6eef3; --accent:#3ddc84; --warn:#ff7b7b; }
+    html,body{ height:100%; margin:0; font-family:Inter, Roboto, Arial; background:var(--bg); color:var(--fg); }
+    .wrap{ max-width:760px; margin:28px auto; padding:20px; border-radius:10px; background:#071018; box-shadow:0 8px 30px rgba(0,0,0,.6); }
+    h1{ margin:0 0 12px 0; font-size:20px; }
+    p{ margin:6px 0 12px 0; color:#bcd3da; }
+    .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    button{ background:var(--accent); border:0; color:#002; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    button.ghost{ background:transparent; border:1px solid #234; color:var(--fg); }
+    .status{ padding:10px; border-radius:8px; background:#04151d; width:100%; box-sizing:border-box; }
+    .big{ font-size:28px; font-weight:700; }
+    .muted{ color:#7fa3ad; font-size:13px; }
+    .warn{ color:var(--warn); font-weight:700; }
+    video{ width:100%; max-height:360px; border-radius:8px; background:#000; }
+    .field{ margin-top:10px; }
+    small{ color:#8fb6be; }
+    .log{ margin-top:12px; font-family: monospace; background:#021015; padding:10px; border-radius:8px; max-height:160px; overflow:auto; font-size:13px; color:#9fd7c9; }
   </style>
 </head>
 <body>
-  <h1>Transferência NFC + WebRTC</h1>
-  <p><em>Exemplo experimental para Android com Chrome (HTTPS e Web NFC ativado)</em></p>
+  <div class="wrap">
+    <h1>Demo Sensor de Proximidade — v1.1</h1>
+    <p>Este site lê o sensor de proximidade (quando disponível) e dispara ações. Há fallback para eventos antigos e para navegadores sem suporte. Requer HTTPS em muitos navegadores.</p>
 
-  <!-- Seleção de papel -->
-  <div id="roleSelection" class="section">
-    <p>Selecione seu papel:</p>
-    <button onclick="selectRole('host')">Host NFC</button>
-    <button onclick="selectRole('guest')">Hospedeiro NFC</button>
-  </div>
-
-  <!-- UI para Host -->
-  <div id="hostUI" class="section hidden">
-    <h2>Host NFC</h2>
-    <button onclick="startHost()">Iniciar Conexão</button>
-    <p id="hostStatus"></p>
-    <div id="hostTransfer" class="hidden">
-      <input type="file" id="fileInput">
-      <button onclick="sendFile()">Enviar Arquivo</button>
+    <div class="row">
+      <button id="startSensor">Iniciar sensor</button>
+      <button id="stopSensor" class="ghost" disabled>Parar sensor</button>
+      <button id="toggleCam" class="ghost">Mostrar câmera</button>
     </div>
-  </div>
 
-  <!-- UI para Hospedeiro -->
-  <div id="guestUI" class="section hidden">
-    <h2>Hospedeiro NFC</h2>
-    <button onclick="startGuest()">Ler Oferta NFC</button>
-    <p id="guestStatus"></p>
-    <div id="guestTransfer" class="hidden">
-      <p id="receivedFile"></p>
+    <div class="field status" id="statusBox">
+      <div class="muted">Estado:</div>
+      <div id="status" class="big">Inativo</div>
+      <div class="muted">Última leitura: <span id="last">—</span></div>
     </div>
+
+    <div class="field">
+      <label class="muted">Valor atual (cm ou proximidade):</label>
+      <div id="value" class="big">—</div>
+      <div class="muted" id="nearFar">—</div>
+    </div>
+
+    <div class="field">
+      <label class="muted">Ação quando próximo:</label>
+      <div class="row">
+        <button id="actionBeep">Tocar som curto</button>
+        <button id="actionFlash" class="ghost">Alterar cor do status</button>
+        <button id="actionCustom" class="ghost">Sem ação</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="muted">Câmera (opcional):</label>
+      <video id="video" autoplay playsinline muted style="display:none"></video>
+    </div>
+
+    <div class="log" id="log">Log iniciado.</div>
   </div>
 
   <script>
-    // Ao carregar a página, verifica o suporte ao NFC e WebRTC.
-    window.onload = async () => {
-      checkSupport();
-    };
+    // Versão: 1.1
+    // Objetivo: usar ProximitySensor quando disponível. Fallback para deviceproximity events. Mostrar cam opcional.
+    // Observações de possíveis bugs: muitos navegadores não suportam ProximitySensor. Requer HTTPS e permissões.
+    (function(){
+      const startBtn = document.getElementById('startSensor');
+      const stopBtn = document.getElementById('stopSensor');
+      const statusEl = document.getElementById('status');
+      const valueEl = document.getElementById('value');
+      const lastEl = document.getElementById('last');
+      const nearFarEl = document.getElementById('nearFar');
+      const logEl = document.getElementById('log');
+      const video = document.getElementById('video');
+      const toggleCam = document.getElementById('toggleCam');
 
-    function checkSupport() {
-      // Verifica suporte a NFC
+      let sensor = null;               // ProximitySensor instance (Generic Sensor API)
+      let usingLegacy = false;         // fallback deviceproximity
+      let stream = null;               // camera stream
+      let lastReading = null;
+      let nearThreshold = 5;           // cm aproximado, ajuste se necessário
+      let currentAction = 'beep';      // ação padrão
+
+      // util: log
+      function log(msg){
+        const time = new Date().toLocaleTimeString();
+        logEl.textContent = `[${time}] ${msg}\n` + logEl.textContent;
+      }
+
+      // ações ao detectar proximidade
+      function onNear() {
+        log('Evento NEAR detectado.');
+        if (currentAction === 'beep') playBeep();
+        if (currentAction === 'flash') flashStatus();
+      }
+
+      function onFar() {
+        log('Evento FAR detectado.');
+        // restaurar cor se necessário
+        statusEl.style.color = '';
+      }
+
+      // som curto com WebAudio (compatível)
+      function playBeep(){
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = 'sine';
+          o.frequency.value = 880;
+          o.connect(g); g.connect(ctx.destination);
+          g.gain.value = 0.05;
+          o.start();
+          setTimeout(()=>{ o.stop(); ctx.close(); }, 120);
+        } catch (e){ log('Erro ao tocar beep: ' + e.message); }
+      }
+
+      // muda cor do texto do status temporariamente
+      function flashStatus(){
+        statusEl.style.color = '#ffdd57';
+        setTimeout(()=> statusEl.style.color = '', 400);
+      }
+
+      // iniciar câmera (opcional)
+      async function startCamera(){
+        if (stream) return;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+          video.srcObject = stream;
+          video.style.display = 'block';
+          toggleCam.textContent = 'Ocultar câmera';
+          log('Câmera iniciada.');
+        } catch (e) {
+          log('Falha ao acessar câmera: ' + e.message);
+        }
+      }
+
+      function stopCamera(){
+        if (!stream) return;
+        stream.getTracks().forEach(t=>t.stop());
+        stream = null;
+        video.srcObject = null;
+        video.style.display = 'none';
+        toggleCam.textContent = 'Mostrar câmera';
+        log('Câmera parada.');
+      }
+
+      toggleCam.addEventListener('click', ()=>{
+        if (stream) stopCamera(); else startCamera();
+      });
+
+      // iniciar leitura de sensor
+      startBtn.addEventListener('click', async ()=>{
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        statusEl.textContent = 'Iniciando...';
+        log('Tentando iniciar sensor de proximidade.');
+
+        // Primeiro tente API moderna: Generic Sensor API (ProximitySensor)
+        try {
+          if ('ProximitySensor' in window) {
+            sensor = new ProximitySensor({ frequency: 10 }); // frequência pode ser ajustada
+            sensor.addEventListener('reading', ()=>{
+              handleReading({distance: sensor.distance, max: sensor.max});
+            });
+            sensor.addEventListener('error', (ev)=>{
+              log('Erro do sensor: ' + (ev.error ? ev.error.name : 'desconhecido'));
+            });
+            await sensor.start();
+            statusEl.textContent = 'Ativo (ProximitySensor)';
+            log('Usando ProximitySensor (API moderna).');
+            return;
+          }
+        } catch (e) {
+          log('ProximitySensor falhou: ' + e.message);
+          // continua para fallback
+        }
+
+        // Fallback para eventos legados deviceproximity / userproximity
+        try {
+          if ('ondeviceproximity' in window || 'onuserproximity' in window) {
+            usingLegacy = true;
+            window.addEventListener('deviceproximity', legacyDeviceHandler);
+            window.addEventListener('userproximity', legacyUserHandler);
+            statusEl.textContent = 'Ativo (evento legado)';
+            log('Usando eventos deviceproximity/userproxim
       if (!("NDEFReader" in window)) {
         alert("Web NFC não suportado neste dispositivo.");
       }
